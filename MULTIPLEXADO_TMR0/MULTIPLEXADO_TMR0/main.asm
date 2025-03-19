@@ -1,0 +1,551 @@
+;
+; MULTIPLEXADO_TMR0.asm
+;
+; Created: 11/03/2025 14:05:44
+; Author : gerav
+;
+
+.dseg							//Segmento de datos
+.org			SRAM_START
+UNI_SEG:			.byte	1
+DEC_SEG:			.byte	1
+UNI_MIN:			.byte	1
+DEC_MIN:			.byte	1
+
+
+//Encabezado (Definicion de registros)
+.include		"M328PDEF.inc"
+
+.equ			TMR0VALUE = 100
+.equ			TMR1VALUE = 0x1B1E
+.equ			TMR2VALUE = 178
+
+.equ			MAXIM_USEG = 10
+.equ			MAXIM_DSEG = 6
+.equ			MAXIM_UMIN = 10
+.equ			MAXIM_DMIN	= 3
+
+.equ			MODES = 3
+
+
+.def			BLINK = R20
+.def			COUNTER = R21
+.def			MODE = R23
+.def			ACTION = R24
+
+
+.cseg
+				//Direccion de vectoresB
+.org			0x0000			//Reset
+	JMP				INICIO
+.org			PCI1addr
+	JMP				PCINT1_ISR
+.org			OVF2addr
+	JMP				TMR2_ISR
+.org			OVF1addr
+	JMP				TMR1_ISR
+.org			OVF0addr
+	JMP				TMR0_ISR 		
+
+
+//Configuracion de la pila
+INICIO:
+	LDI			R16, LOW(RAMEND)
+	OUT			SPL, R16
+	LDI			R16, HIGH(RAMEND)
+	OUT			SPH, R16
+
+//Tabla de Display
+T7S:			.DB		0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x67
+
+//----------------------------------------------------------------------------//
+//Configuracion de SETUP
+SETUP:
+	CLI									//Desabilitamos interrupciones globales
+//Desabilitamos comunicacion serial
+	LDI			R16, 0x00
+	STS			UCSR0B, R16
+//Configuracion de oscilador externo
+	LDI			R16, (1 << CLKPCE)
+	STS			CLKPR, R16
+	LDI			R16, 0b00000100			//Prescaler a 16 => 1MHz	
+	STS			CLKPR, R16
+
+//Iniciamos el TMR0
+	LDI			R16, 0x00
+	OUT			TCCR0A, R16
+	LDI			R16, (1 << CS02) | (1 << CS00)
+	OUT			TCCR0B, R16
+	LDI			R16, TMR0VALUE
+	OUT			TCNT0, R16
+//Habilitamos interrupcion de TMR0
+	//LDI			R16, (1 << TOIE0)
+	//STS			TIMSK0, R16
+
+//Iniciamos el TMR1
+	LDI			R16, HIGH(TMR1VALUE)
+	STS			TCNT1H, R16
+	LDI			R16, LOW(TMR1VALUE)
+	STS			TCNT1L, R16
+	LDI			R16, 0x00
+	STS			TCCR1A, R16
+	LDI			R16, (1 << CS12) | (1 << CS10)
+	STS			TCCR1B, R16
+//Habilitamos interrupcion de TMR1
+	LDI			R16, (1 << TOIE1)
+	STS			TIMSK1, R16
+
+//Iniciamos el TMR2
+	LDI			R16, (1 << CS22)
+	STS			TCCR2B, R16
+	LDI			R16, TMR2VALUE
+	STS			TCNT2, R16
+//Habilitamos interrupcion de TMR2
+	LDI			R16, (1 << TOIE2)
+	STS			TIMSK2, R16
+
+//Iniciamos Pin Change
+	LDI			R16, (1 << PCINT8) | (1 << PCINT9) | (1 << PCINT10)
+	STS			PCMSK1, R16
+	LDI			R16, (1 << PCIE1)
+	STS			PCICR, R16
+
+//Configuracion de entradas/salidas
+	//Indicadores/Transistores
+	LDI			R16, 0xFF
+	OUT			DDRB, R16
+	LDI			R16, 0x00
+	OUT			PORTB, R16
+
+	SBI			DDRC, PC4
+	SBI			DDRC, PC5
+	CBI			PORTC, PC4
+	CBI			PORTC, PC5
+	//Display
+	LDI			R16, 0b01111111
+	OUT			DDRD, R16
+	LDI			R16, 0x00
+	OUT			PORTD, R16
+	//Botones
+	CBI			DDRC, PC0
+	CBI			DDRC, PC1
+	CBI			DDRC, PC2
+	SBI			PORTC, PC0
+	SBI			PORTC, PC1
+	SBI			PORTC, PC2
+
+//Configuracion de registros
+	CLR			COUNTER
+	LDI			R16, 0x00
+	STS			UNI_SEG, R16
+	STS			DEC_SEG, R16
+	STS			UNI_MIN, R16
+	STS			DEC_MIN, R16
+	CLR			R1
+	CLR			MODE
+	CLR			ACTION
+
+	SEI
+	RJMP		MAIN
+
+//---------------------------------------------------------------------------//
+//LOOP
+//---------------------------------------------------------------------------//
+FECHA:
+	SBI			PORTC, PC4
+	SBI			PORTC, PC5
+
+	RJMP		MAIN
+
+MAIN:
+	//VERIFICAMOS EN QUE ESTADOS NOS ENCONTRAMOS
+	CPI			MODE, 0
+	BREQ		AUTOMATICO
+	CPI			MODE, 1
+	BREQ		MANUAL
+	CPI			MODE, 2
+	BREQ		FECHA
+	RJMP		MAIN
+
+
+AUTOMATICO:										//INCREMENTO AUTOMATICO
+	SBI			PORTC, PC4
+	CBI			PORTC, PC5
+
+	MOV			R17, COUNTER
+	ANDI		R17, 0b00000011
+	CPI			R17, 0
+	BREQ		MOSTRAR_USEG
+	CPI			R17, 1
+	BREQ		MOSTRAR_DSEG
+	CPI			R17, 2
+	BREQ		MOSTRAR_UMIN
+	CPI			R17, 3
+	BREQ		MOSTRAR_DMIN
+	RJMP		MAIN
+	MOSTRAR_USEG:
+	CALL		UNIDADES_SEG
+	RJMP		MAIN
+	MOSTRAR_DSEG:
+	CALL		DECENAS_SEG
+	RJMP		MAIN
+	MOSTRAR_UMIN:
+	CALL		UNIDADES_MIN
+	RJMP		MAIN
+	MOSTRAR_DMIN:
+	CALL		DECENAS_MIN
+	RJMP		MAIN
+
+MANUAL:											//INCREMENTO MANUAL
+	CBI			PORTC, PC4
+	SBI			PORTC, PC5
+
+	CPI			ACTION, 0x01					//COMPARA EL VALOR DE ACTION PARA TOMAR DECISIONES
+	BREQ		INCREMENTAR_UNI_SEG
+	CPI			ACTION, 0x02
+	BREQ		DECREMENTAR_UNI_SEG
+	RJMP		MOSTRAR_VALORES
+
+	INCREMENTAR_UNI_SEG:					
+
+	LDS			R16, UNI_SEG					//INCREMENTA Y LUEGO COMPARA
+	INC			R16
+	CPI			R16, MAXIM_USEG
+	BRLO		STORE_UNI_SEG
+	CLR			R16
+
+	LDS			R17, DEC_SEG					//INCREMENTA Y LUEGO COMPARA CON LIMITE
+	INC			R17
+	CPI			R17, MAXIM_DSEG
+	BRLO		STORE_DEC_SEG
+	CLR			R17
+
+	LDS			R18, UNI_MIN					//COMPARA Y LUEGO INCREMENTA
+	INC			R18
+	LDS			R19, DEC_MIN
+	CPI			R19, 2
+	BRNE		INCREMENTO_NORMAL				//INCREMENTA PARA EL OVERFLOW DE 23:59 A 00:00
+	CPI			R18, 4
+	BRLO		STORE_UNI_MIN
+	CLR			R18
+	CLR			R19
+	RJMP		STORE_DEC_MIN
+	INCREMENTO_NORMAL:	
+	CPI			R18, MAXIM_UMIN
+	BRLO		STORE_UNI_MIN
+	CLR			R18
+	INC			R19
+	CPI			R19, MAXIM_DMIN
+	BRLO		STORE_DEC_MIN
+	CLR			R19
+//===========================================
+	STORE_UNI_SEG:										//GUARDA VALORES EN LA RAM - INCREMENTO
+	STS			UNI_SEG, R16
+	RJMP		RESET_ACTION
+	STORE_DEC_SEG:
+	STS			DEC_SEG, R17
+	RJMP		STORE_UNI_SEG
+	STORE_UNI_MIN:
+	STS			UNI_MIN, R18
+	RJMP		STORE_DEC_SEG
+	STORE_DEC_MIN:
+	STS			DEC_MIN, R19
+	RJMP		STORE_UNI_MIN
+//============================================
+	DECREMENTAR_UNI_SEG:
+	LDS			R16, UNI_SEG							//DECREMENTA Y LUEGO COMPARA
+	DEC			R16
+	CPI			R16, 0xFF
+	BRNE		STORE_UNI_SEG_DEC
+	LDI			R16, MAXIM_USEG - 1
+
+	LDS			R17, DEC_SEG
+	DEC			R17
+	CPI			R17, 0xFF
+	BRNE		STORE_DEC_SEG_DEC
+	LDI			R17, MAXIM_DSEG - 1
+
+	LDS			R18, UNI_MIN
+	DEC			R18
+	CPI			R18, 0xFF
+	BRNE		STORE_UNI_MIN_DEC
+	LDI			R18, MAXIM_UMIN - 1
+
+	LDS			R19, DEC_MIN
+	DEC			R19
+	CPI			R19, 0xFF
+	BRNE		STORE_DEC_MIN_DEC
+	LDI			R16, 9
+	LDI			R17, 5
+	LDI			R18, 3
+	LDI			R19, 2
+	RJMP		STORE_DEC_MIN_DEC
+//============================================
+	STORE_UNI_SEG_DEC:									//GUARDA VALORES EN LA RAM - DECREMENTO
+	STS			UNI_SEG, R16
+	RJMP		RESET_ACTION
+	STORE_DEC_SEG_DEC:
+	STS			DEC_SEG, R17
+	RJMP		STORE_UNI_SEG_DEC
+	STORE_UNI_MIN_DEC:
+	STS			UNI_MIN, R18
+	RJMP		STORE_DEC_SEG_DEC
+	STORE_DEC_MIN_DEC:
+	STS			DEC_MIN, R19
+	RJMP		STORE_UNI_MIN_DEC
+//============================================
+	RESET_ACTION:										//LIMPIAMOS VARIABLE ACTION PARA NUEVA INTERRUPCION
+	CLR			ACTION
+	RJMP		MOSTRAR_VALORES
+//============================================
+	MOSTRAR_VALORES:									//FUNCION DE MULTIPLEXADO - INCREMENTO/DECREMENTO
+	MOV			R17, COUNTER
+	ANDI		R17, 0b00000011
+	CPI			R17, 0
+	BREQ		MOSTRAR2_USEG
+	CPI			R17, 1
+	BREQ		MOSTRAR2_DSEG
+	CPI			R17, 2
+	BREQ		MOSTRAR2_UMIN
+	CPI			R17, 3
+	BREQ		MOSTRAR2_DMIN			
+	RJMP		MAIN
+	MOSTRAR2_USEG:
+	CALL		UNIDADES_SEG
+	RJMP		MAIN
+	MOSTRAR2_DSEG:
+	CALL		DECENAS_SEG
+	RJMP		MAIN
+	MOSTRAR2_UMIN:
+	CALL		UNIDADES_MIN
+	RJMP		MAIN
+	MOSTRAR2_DMIN:
+	CALL		DECENAS_MIN
+	RJMP		MAIN
+
+//----------------------------------------------------------------------//
+//Sub rutinas
+//---------------------------------------------------------------------//
+UNIDADES_SEG:
+	CBI			PORTB, PB3					//UNIDADES
+	CBI			PORTB, PB2					//DECENAS
+	CBI			PORTB, PB1
+	CBI			PORTB, PB0
+	LDS			R16, UNI_SEG
+	LDI			ZL, LOW(T7S << 1)
+	LDI			ZH, HIGH(T7S << 1)
+	ADD			ZL, R16
+	ADC			ZH, R1
+	LPM			R16, Z
+	OUT			PORTD, R16
+	SBI			PORTB, PB3					//UNIDADES
+	RET
+
+DECENAS_SEG:
+	CBI			PORTB, PB3					//UNIDADES
+	CBI			PORTB, PB2					//DECENAS
+	CBI			PORTB, PB1					//UNIDADES
+	CBI			PORTB, PB0					//DECENAS
+	LDS			R16, DEC_SEG
+	LDI			ZL, LOW(T7S << 1)
+	LDI			ZH, HIGH(T7S << 1)
+	ADD			ZL, R16
+	ADC			ZH, R1
+	LPM			R16, Z
+	OUT			PORTD, R16
+	SBI			PORTB, PB2					//DECENAS
+	RET
+
+UNIDADES_MIN:
+	CBI			PORTB, PB3					//UNIDADES
+	CBI			PORTB, PB2					//DECENAS
+	CBI			PORTB, PB1					//UNIDADES
+	CBI			PORTB, PB0					//DECENAS
+	LDS			R16, UNI_MIN
+	LDI			ZL, LOW(T7S << 1)
+	LDI			ZH, HIGH(T7S << 1)
+	ADD			ZL, R16
+	ADC			ZH, R1
+	LPM			R16, Z
+	OUT			PORTD, R16
+	SBI			PORTB, PB1					//UNIDADES
+	RET
+
+DECENAS_MIN:
+	CBI			PORTB, PB3					//UNIDADES
+	CBI			PORTB, PB2					//DECENAS
+	CBI			PORTB, PB1					//UNIDADES
+	CBI			PORTB, PB0					//DECENAS
+	LDS			R16, DEC_MIN
+	LDI			ZL, LOW(T7S << 1)
+	LDI			ZH, HIGH(T7S << 1)
+	ADD			ZL, R16
+	ADC			ZH, R1
+	LPM			R16, Z
+	OUT			PORTD, R16
+	SBI			PORTB, PB0					//DECENAS
+	RET	
+
+//--------------------------------------------------------------------//
+//Rutinas de Interrupcion
+//--------------------------------------------------------------------//
+PCINT1_ISR:
+	PUSH		R16
+	IN			R16, SREG
+	PUSH		R16
+
+	IN			R19, PINC
+
+	SBI			TIFR0, TOV0
+	LDI			R16, TMR0VALUE
+	OUT			TCNT0, R16
+	LDI			R16, (1 << TOIE0)
+	STS			TIMSK0, R16
+
+	EXIT_PCINT1_ISR:
+	POP			R16
+	OUT			SREG, R16
+	POP			R16
+	RETI
+//------------------------------------------------------------
+TMR0_ISR:
+	PUSH		R16
+	IN			R16, SREG
+	PUSH		R16
+
+	IN			R16, PINC
+	CP			R16, R19
+	BRNE		EXIT_TMR0_ISR
+
+	SBIS		PINC, PC0
+	INC			MODE
+
+	LDI			R16, MODES
+	CPSE		MODE, R16
+	RJMP		PC+2
+	CLR			MODE
+
+	CPI			MODE, 0
+	BREQ		MODE0
+	CPI			MODE, 1
+	BREQ		MODE1
+	CPI			MODE, 2
+	BREQ		MODE2
+	RJMP		EXIT_TMR0_ISR
+
+	MODE0:
+	RJMP		EXIT_TMR0_ISR
+	MODE1:
+	SBIS		PINC, PC1
+	LDI			ACTION, 0x01
+	SBIS		PINC, PC2
+	LDI			ACTION, 0x02
+	RJMP		EXIT_TMR0_ISR
+	MODE2:
+	RJMP		EXIT_TMR0_ISR
+
+	EXIT_TMR0_ISR:
+	//LDS			R16, TIMSK0
+	//ANDI		R16, 0b11111110
+	//STS			TIMSK0, R16
+
+	POP			R16
+	OUT			SREG, R16
+	POP			R16
+	RETI
+//--------------------------------------------------------------
+TMR1_ISR:
+	PUSH		R18
+	IN			R18, SREG
+	PUSH		R18
+
+	LDI			R16, HIGH(TMR1VALUE)
+	STS			TCNT1H, R16
+	LDI			R16, LOW(TMR1VALUE)
+	STS			TCNT1L, R16
+
+	CPI			MODE, 0
+	BRNE		EXIT_TMR1_ISR
+	LDI			ACTION, 0x00
+		
+										//Cargamos RAM UNIDADES SEGUNDOS
+	LDS			R16, UNI_SEG
+	INC			R16
+	CPI			R16, MAXIM_USEG
+	BRNE		STORE_UNISEG
+	CLR			R16
+	STS			UNI_SEG, R16			
+										//Cargamos RAM DECENAS SEGUNDOS
+	LDS			R16, DEC_SEG	
+	INC			R16
+	CPI			R16, MAXIM_DSEG
+	BRNE		STORE_DECSEG
+	CLR			R16
+	STS			DEC_SEG, R16
+										//Cargamos y comparamos RAM UNIDAMES MINUTOS
+	LDS			R16, UNI_MIN
+	INC			R16
+										//Cargamos y tambien comparamos RAM DECENAS MINUTOS
+	LDS			R26, DEC_MIN
+	CPI			R26, 2
+	BRNE		INCREMENTO_NORMAL_TMR1
+	CPI			R16, 4
+	BRLO		STORE_UNIMIN
+	CLR			R16
+	CLR			R26
+	RJMP		STORE_DECMIN
+	INCREMENTO_NORMAL_TMR1:					//Funcion que no permite que sobrepase o se muestre un valor alto
+	CPI			R16, MAXIM_UMIN
+	BRLO		STORE_UNIMIN
+	CLR			R16
+	INC			R26
+	CPI			R26, MAXIM_DMIN
+	BRLO		STORE_DECMIN
+	CLR			R26
+
+	STORE_UNISEG:						//Guardamos valores
+	STS			UNI_SEG, R16
+	RJMP		EXIT_TMR1_ISR
+	STORE_DECSEG:
+	STS			DEC_SEG, R16
+	RJMP		EXIT_TMR1_ISR
+	STORE_UNIMIN:
+	STS			UNI_MIN, R16
+	RJMP		EXIT_TMR1_ISR
+	STORE_DECMIN:
+	STS			DEC_MIN, R26
+	RJMP		EXIT_TMR1_ISR
+
+	EXIT_TMR1_ISR:
+	POP			R16
+	OUT			SREG, R16
+	POP			R16
+	RETI
+//----------------------------------------------------------------
+TMR2_ISR:
+	PUSH		R17
+	IN			R17, SREG
+	PUSH		R17
+
+	SBI			TIFR2, TOV2
+	LDI			R16, TMR2VALUE
+	STS			TCNT2, R16
+
+	INC			COUNTER
+	CPI			COUNTER, 200
+	BRNE		CHECK_BLINK
+	CLR			COUNTER
+
+	CHECK_BLINK:
+	INC			BLINK
+	CPI			BLINK, 100
+	BRNE		EXIT_TMR2_ISR
+	SBI			PINB, PB5
+	CLR			BLINK
+
+	EXIT_TMR2_ISR:
+	POP			R17
+	OUT			SREG, R17
+	POP			R17
+	RETI
+//------------------------------------------------------------
